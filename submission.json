@@ -1,0 +1,32 @@
+{
+  "project_name": "Enterprise Document Search System with Retrieval-Augmented Generation (RAG)",
+  "version": "1.0.0",
+  "author": "Antigravity Engineering",
+  "stack": {
+    "framework": "FastAPI",
+    "language": "Python 3.10",
+    "database": "PostgreSQL 15",
+    "vector_database": "Qdrant",
+    "embeddings": "sentence-transformers/all-MiniLM-L6-v2",
+    "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2 / Cohere Rerank API",
+    "containerization": "Docker & Docker Compose"
+  },
+  "endpoints": {
+    "health": "GET /health",
+    "upload_document": "POST /api/documents",
+    "get_document_status": "GET /api/documents/{document_id}",
+    "delete_document": "DELETE /api/documents/{document_id}",
+    "query_rag": "POST /api/query"
+  },
+  "features": [
+    "Multi-format document parsing (PDF, DOCX, HTML, TXT)",
+    "Semantic recursive chunking with configurable overlap",
+    "Sentence Transformers dense vector generation",
+    "Qdrant vector collection management & indexing",
+    "BM25 sparse keyword search integration",
+    "Reciprocal Rank Fusion (RRF) hybrid retrieval",
+    "Cross-Encoder and Cohere re-ranking pipeline",
+    "Contextual LLM answer generation with strict [Source ID: ...] citations",
+    "Fully containerized with health checks and Docker Compose"
+  ]
+}
