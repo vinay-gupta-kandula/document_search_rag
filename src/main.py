@@ -40,6 +40,9 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down Enterprise RAG Services...")
 
+import os
+from fastapi.responses import FileResponse
+
 app = FastAPI(
     title="Enterprise Document Search System with RAG",
     description="Multi-component RAG pipeline featuring document ingestion, chunking, embedding generation, hybrid search (dense vector + BM25), re-ranking, and cited LLM answer generation.",
@@ -47,12 +50,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.get("/", include_in_schema=False)
+def serve_ui():
+    """Serve interactive web UI for document ingestion and hybrid RAG search."""
+    ui_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(ui_path):
+        return FileResponse(ui_path, media_type="text/html")
+    return {"message": "Enterprise Document Search API is running. Visit /docs for the Swagger UI."}
+
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 def health_check(db: Session = Depends(get_db)):
-    """Health check endpoint used by Docker health checks and monitoring."""
     db_status = "healthy"
     try:
-        db.execute("SELECT 1")
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
 

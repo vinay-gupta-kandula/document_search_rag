@@ -80,15 +80,24 @@ class VectorDBService:
                 ]
             )
 
-        search_result = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=query_filter
-        )
+        if hasattr(self.client, "query_points"):
+            response = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                limit=limit,
+                query_filter=query_filter
+            )
+            hits = response.points
+        else:
+            hits = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=limit,
+                query_filter=query_filter
+            )
 
         results = []
-        for hit in search_result:
+        for hit in hits:
             results.append({
                 "chunk_id": hit.payload.get("chunk_id", str(hit.id)),
                 "document_id": hit.payload.get("document_id"),

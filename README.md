@@ -1,226 +1,300 @@
 # Enterprise Document Search System with Retrieval-Augmented Generation (RAG)
 
-A production-grade, containerized Enterprise Document Search and Retrieval-Augmented Generation (RAG) system built with **FastAPI**, **PostgreSQL**, **Qdrant Vector Database**, **Sentence Transformers**, **BM25**, and **Cross-Encoder / Cohere Re-rankers**.
+A production-ready enterprise document search system featuring hybrid retrieval (Dense Vector + BM25 Okapi), cross-encoder re-ranking, and grounded LLM answer synthesis with source attribution.
+
+Built with **FastAPI**, **PostgreSQL**, **Qdrant Vector Database**, **Sentence Transformers**, and containerized with **Docker Compose**.
 
 ---
 
-## 🌟 Architectural Overview
+## Architecture
 
 ```
-                      +---------------------------------------+
-                      |               Client                  |
-                      +-------------------+-------------------+
-                                          |
-                        POST /api/query   |   POST /api/documents
-                                          v
-                      +---------------------------------------+
-                      |              FastAPI                  |
-                      |            Application                |
-                      +---------+-------------------+---------+
-                                |                   |
-                 +--------------+                   +---------------+
-                 v                                                  v
-     [Hybrid Search Engine]                            [Document Ingestion Pipeline]
-     +--------------------------+                      +--------------------------+
-     | 1. Dense Vector Search   |                      | 1. Unstructured Parsing  |
-     |    (Qdrant Cosine)       |                      |    (PDF, DOCX, HTML, TXT)|
-     | 2. Sparse Keyword Search |                      | 2. Recursive Chunking    |
-     |    (BM25 Okapi)          |                      | 3. Dense Embedding       |
-     | 3. Reciprocal Rank       |                      |    (all-MiniLM-L6-v2)    |
-     |    Fusion (RRF)          |                      | 4. Vector DB Indexing    |
-     | 4. Re-Ranking            |                      | 5. PostgreSQL Metadata   |
-     |    (Cross-Encoder/Cohere)|                      +--------------------------+
-     +------------+-------------+                                   |
-                  |                                                 v
-                  v                                    +--------------------------+
-     [LLM Citation Synthesis]                          |       PostgreSQL         |
-     +--------------------------+                      |    (Documents Table)     |
-     | Prompt Context Injection |                      +--------------------------+
-     | [Source ID: ...] mapping |                                   |
-     +------------+-------------+                                   v
-                  |                                    +--------------------------+
-                  v                                    |   Qdrant Vector DB       |
-          Structured Response                          | (document_chunks payload)|
-                                                       +--------------------------+
+                                 Client / Browser
+                   [Web UI at http://localhost:8000 / Swagger at /docs]
+                                       |
+                +----------------------+----------------------+
+                |                                             |
+         Upload Document                               Ask Question
+      (POST /api/documents)                         (POST /api/query)
+                |                                             |
+                v                                             v
+     +--------------------+                       +-----------------------+
+     | Ingestion Pipeline |                       |  Hybrid Search Engine |
+     +---------+----------+                       +-----------+-----------+
+               |                                              |
+      [1. Parse Text]                            [1. Dense Vector Search]
+      (pypdf / docx / bs4)                       (Cosine similarity in Qdrant)
+               |                                              |
+     [2. Recursive Chunk]                        [2. Sparse Keyword Search]
+     (500 chars / 80 overlap)                    (BM25 Okapi algorithm)
+               |                                              |
+      [3. Embed Vectors]                         [3. Reciprocal Rank Fusion]
+      (all-MiniLM-L6-v2)                         (Score normalization & merge)
+               |                                              |
+      [4. Upsert Storage]                        [4. Re-Ranking Layer]
+         /           \                           (Cross-Encoder ms-marco)
+        /             \                                       |
+       v               v                                      v
++-------------+ +-------------+                  +-------------------------+
+| PostgreSQL  | |   Qdrant    |                  |  LLM Citation Generator |
+| (Metadata & | | (Embeddings |                  | (Strict [Source ID: ...] |
+|  Statuses)  | |  & Payload) |                  |   source attribution)   |
++-------------+ +-------------+                  +-------------------------+
 ```
 
 ---
 
-## 🚀 Key Features
+## Step-by-Step Implementation Guide
 
-1. **Multi-Format Ingestion**: Ingests `.pdf`, `.docx`, `.html`, and plain text documents with metadata and error handling.
-2. **Recursive Semantic Chunking**: Splits large documents into coherent sections maintaining semantic boundaries and configurable overlap.
-3. **Dense Vector Embeddings**: Uses CPU-optimized `sentence-transformers/all-MiniLM-L6-v2` generating 384-dimensional dense vectors.
-4. **Relational Metadata Store**: Stores document processing states (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`), chunk counts, file sizes, and timestamps in PostgreSQL.
-5. **High-Performance Vector Database**: Qdrant stores chunks and vector indices with payload filtering by `document_id`.
-6. **Hybrid Retrieval**: Combines semantic cosine similarity search with BM25 Okapi keyword matching using Reciprocal Rank Fusion (RRF).
-7. **Re-Ranking Step**: Re-ranks top retrieved contexts using a Cross-Encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) or Cohere Rerank API.
-8. **Factual LLM Answer Generation with Strict Citations**: Synthesizes verified answers with references in the exact format `[Source ID: <chunk_id>]` mapped back to document metadata.
-9. **Fully Containerized**: Ready to start with `docker-compose up` including automatic health checks on all services.
+Here is a breakdown of how each layer of the pipeline was designed and built:
 
----
+### Step 1: Containerization & Service Orchestration
+- Configured multi-container orchestration in `docker-compose.yml` with 3 core services:
+  - `api`: FastAPI backend running Uvicorn on port `8000`.
+  - `db`: PostgreSQL 15 storing metadata in a dedicated volume with a `pg_isready` health check.
+  - `vector_db`: Qdrant vector database running on ports `6333` and `6334` with an automated health probe.
+- Created `Dockerfile` with multi-stage layer caching that pre-downloads the embedding model (`sentence-transformers/all-MiniLM-L6-v2`) and cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) directly during container build, preventing latency on the first query.
 
-## 📁 Repository Structure
+### Step 2: Relational Metadata Schema (`src/models.py`)
+- Created a `documents` table in PostgreSQL using SQLAlchemy:
+  - `id`: String UUID primary key.
+  - `filename`: Original name of the uploaded document.
+  - `file_type`: Extension (`pdf`, `docx`, `html`, `txt`).
+  - `file_size`: Size in bytes.
+  - `status`: Enum (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+  - `chunk_count`: Total chunks indexed.
+  - `error_message`: Captured stack trace if ingestion fails.
+  - `created_at` / `updated_at`: Timestamp tracking.
 
-```
-.
-├── .env.example              # Environment variables template
-├── .env                      # Local environment configuration
-├── docker-compose.yml        # Multi-container orchestration (api, db, vector_db)
-├── Dockerfile                # Production container for API service
-├── requirements.txt          # Python dependencies
-├── submission.json           # Project metadata & specifications
-├── README.md                 # System documentation & API guide
-├── src/
-│   ├── config.py             # Settings via Pydantic
-│   ├── database.py           # PostgreSQL engine and session management
-│   ├── models.py             # SQLAlchemy models (Document, DocumentStatus)
-│   ├── schemas.py            # Pydantic request & response schemas
-│   ├── parser.py             # Document parsers & recursive chunker
-│   ├── embeddings.py         # Sentence Transformers embedding service
-│   ├── vector_db.py          # Qdrant client & collection management
-│   ├── reranker.py           # Cross-Encoder & Cohere re-ranking
-│   ├── search.py             # Hybrid Search (Dense Vector + BM25 + RRF)
-│   ├── pipeline.py           # Background ingestion worker
-│   ├── llm.py                # LLM answer synthesis & citation extraction
-│   └── main.py               # FastAPI application & REST endpoints
-└── tests/
-    ├── test_parser.py        # Parser & chunker tests
-    └── test_search_and_llm.py # Hybrid search & citation tests
-```
+### Step 3: Multi-Format Parsing & Semantic Chunking (`src/parser.py`)
+- **Extraction**: Handles binary PDF streams (`pypdf`), Word documents (`python-docx`), web pages (`beautifulsoup4` stripping script and style tags), and UTF-8 / latin-1 fallback text.
+- **Recursive Chunking**: Implemented semantic character splitting with configurable hierarchy (`\n\n` -> `\n` -> sentences -> words) using 500-character windows and 80-character overlap to retain context across boundaries.
 
----
+### Step 4: Vector Store & Dense Embeddings (`src/embeddings.py`, `src/vector_db.py`)
+- Uses `sentence-transformers/all-MiniLM-L6-v2` running on CPU to generate 384-dimensional normalized dense vectors.
+- Manages collections in Qdrant with cosine distance metrics. Each point stores the vector along with its payload: `chunk_id`, `document_id`, `filename`, `chunk_index`, and raw text chunk.
+- Added payload indexing on `document_id` for fast deletions and document filtering.
 
-## ⚙️ Setup and Installation
+### Step 5: Asynchronous Ingestion Worker (`src/pipeline.py`)
+- Implemented background task handling via FastAPI `BackgroundTasks`.
+- When a file is uploaded, the API responds immediately with `202 Accepted` and a unique `document_id`.
+- The background thread parses the file, chunks the text, creates dense embeddings, batch upserts to Qdrant, updates chunk counts, and transitions status to `COMPLETED`.
 
-### Prerequisites
-- [Docker](https://docs.docker.com/get-docker/) (v20.10+)
-- [Docker Compose](https://docs.docker.com/compose/) (v2.0+)
+### Step 6: Hybrid Search & Reciprocal Rank Fusion (`src/search.py`)
+- **Dense Vector Search**: Queries Qdrant using the query embedding to return top cosine matches.
+- **BM25 Keyword Search**: Evaluates exact term matches over raw text chunks using `rank_bm25` (Okapi formula).
+- **Reciprocal Rank Fusion (RRF)**: Merges ranked candidate lists using:
+  $$\text{RRF Score} = \alpha \cdot \frac{1}{60 + \text{rank}_{\text{dense}}} + (1 - \alpha) \cdot \frac{1}{60 + \text{rank}_{\text{bm25}}}$$
+  Adjustable `hybrid_alpha` parameter allows balancing keyword vs semantic weight.
 
-### Quick Start (Single Command)
+### Step 7: Re-Ranking Layer (`src/reranker.py`)
+- Takes top merged candidates and passes `(query, document_chunk)` pairs to a cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) or Cohere Rerank API.
+- Generates deep cross-attention relevance scores and sorts results descending.
 
-1. Clone repository and navigate to root:
-   ```bash
-   cd document_search_rag
-   ```
+### Step 8: Answer Generation & Source Attribution (`src/llm.py`)
+- Formats retrieved chunks with explicit identifiers: `[Source ID: <chunk_id>]`.
+- Sends instructions to the LLM (OpenAI GPT-4o-mini or the built-in intelligent extractive engine) demanding factual answers grounded solely in the provided context.
+- Extracts cited source IDs from the generated text and maps them back into a structured `sources` list adhering to the `SourceAttribution` contract.
 
-2. Copy environment file:
-   ```bash
-   cp .env.example .env
-   ```
-
-3. Launch all services:
-   ```bash
-   docker-compose up --build
-   ```
-
-4. Verify health:
-   ```bash
-   curl http://localhost:8000/health
-   ```
-   Interactive Swagger docs are accessible at: [http://localhost:8000/docs](http://localhost:8000/docs)
+### Step 9: Web User Interface (`src/static/index.html`)
+- Built a standalone browser dashboard served directly at `http://localhost:8000/`.
+- Features drag-and-drop document upload, live status tracking, search controls (Top-K and Hybrid Balance sliders), and grounded answer rendering with source metadata cards.
 
 ---
 
-## 📡 API Specification & Usage
+## Essential Commands & Setup
 
-### 1. Health Check
-- **Endpoint**: `GET /health`
-- **Response**:
-```json
-{
-  "status": "healthy",
-  "database": "healthy",
-  "vector_db": "healthy"
-}
-```
+### 1. Clone & Prepare Environment
+Create your `.env` configuration file from the template:
 
-### 2. Upload Document
-- **Endpoint**: `POST /api/documents`
-- **Content-Type**: `multipart/form-data`
-- **Request**:
 ```bash
-curl -X POST "http://localhost:8000/api/documents" \
-  -F "file=@example_policy.pdf"
+cp .env.example .env
 ```
-- **Response (202 Accepted)**:
+
+*(On Windows PowerShell)*:
+```powershell
+Copy-Item .env.example .env
+```
+
+### 2. Build and Start the Entire System
+Run everything using a single Docker Compose command:
+
+```bash
+docker compose up --build -d
+```
+
+### 3. Check Service Health
+Verify that the API, PostgreSQL database, and Qdrant are healthy:
+
+```bash
+curl http://localhost:8000/health
+```
+
+*(On Windows PowerShell, use `curl.exe`)*:
+```powershell
+curl.exe http://localhost:8000/health
+```
+
+Expected output:
+```json
+{"status":"healthy","database":"healthy","vector_db":"healthy"}
+```
+
+### 4. Ingest a Document via CLI
+Upload a document (`.pdf`, `.docx`, `.txt`, `.html`, or `.md`):
+
+```bash
+curl -X POST "http://localhost:8000/api/documents" -F "file=@README.md"
+```
+
+Response:
 ```json
 {
-  "document_id": "c71e2858-a720-4131-b856-11f845778809",
-  "filename": "example_policy.pdf",
+  "document_id": "0074b64e-0f31-41f1-9418-5ca223fd6d55",
+  "filename": "README.md",
   "status": "PENDING",
   "message": "Document uploaded successfully. Background ingestion pipeline started."
 }
 ```
 
-### 3. Check Document Processing Status
-- **Endpoint**: `GET /api/documents/{document_id}`
-- **Response**:
+### 5. Check Document Ingestion Status
+Track the document processing status using its `document_id`:
+
+```bash
+curl http://localhost:8000/api/documents/0074b64e-0f31-41f1-9418-5ca223fd6d55
+```
+
+Response:
 ```json
 {
-  "document_id": "c71e2858-a720-4131-b856-11f845778809",
-  "filename": "example_policy.pdf",
-  "file_type": "pdf",
-  "file_size": 15420,
+  "document_id": "0074b64e-0f31-41f1-9418-5ca223fd6d55",
+  "filename": "README.md",
+  "file_type": "md",
+  "file_size": 9118,
   "status": "COMPLETED",
   "error_message": null,
-  "chunk_count": 8,
-  "created_at": "2026-10-30T13:00:00",
-  "updated_at": "2026-10-30T13:00:03"
+  "chunk_count": 24,
+  "created_at": "2026-10-31T08:20:05.237275",
+  "updated_at": "2026-10-31T08:20:07.371954"
 }
 ```
 
-### 4. Delete Document
-- **Endpoint**: `DELETE /api/documents/{document_id}`
-- **Response**:
-```json
-{
-  "document_id": "c71e2858-a720-4131-b856-11f845778809",
-  "status": "DELETED",
-  "message": "Document c71e2858-a720-4131-b856-11f845778809 and associated vector embeddings successfully deleted."
-}
+### 6. Perform a Hybrid RAG Query
+Send a question to the system:
+
+```bash
+curl -X POST "http://localhost:8000/api/query" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "How does hybrid search work?", "top_k": 3, "hybrid_alpha": 0.5}'
 ```
 
-### 5. Hybrid RAG Query
-- **Endpoint**: `POST /api/query`
-- **Request Body**:
+Response:
 ```json
 {
-  "query": "What are the data encryption requirements for production servers?",
-  "top_k": 3,
-  "hybrid_alpha": 0.5
-}
-```
-- **Response (200 OK)**:
-```json
-{
-  "query": "What are the data encryption requirements for production servers?",
-  "answer": "All production data must be encrypted both at rest using AES-256 and in transit using TLS 1.3. [Source ID: 4976722c-aef6-4191-be71-a75d50325fa1]",
+  "query": "How does hybrid search work?",
+  "answer": "Hybrid search combines dense vector similarity search from Qdrant with sparse keyword matching from BM25. [Source ID: 9c9dc4aa-0b41-4a09-b1a8-b487f6532b48]",
   "sources": [
     {
-      "source_id": "4976722c-aef6-4191-be71-a75d50325fa1",
-      "document_id": "c71e2858-a720-4131-b856-11f845778809",
-      "filename": "example_policy.pdf",
-      "chunk_index": 2,
-      "content": "All production database storage volumes must enforce AES-256 encryption at rest. Network communications across services must use TLS 1.3.",
+      "source_id": "9c9dc4aa-0b41-4a09-b1a8-b487f6532b48",
+      "document_id": "0074b64e-0f31-41f1-9418-5ca223fd6d55",
+      "filename": "README.md",
+      "chunk_index": 5,
+      "content": "Hybrid search combines dense vector cosine similarity with BM25 Okapi keyword scoring...",
       "relevance_score": 0.942,
       "metadata": {
-        "filename": "example_policy.pdf",
-        "document_id": "c71e2858-a720-4131-b856-11f845778809",
-        "chunk_index": 2,
-        "total_chunks": 8
+        "filename": "README.md",
+        "document_id": "0074b64e-0f31-41f1-9418-5ca223fd6d55",
+        "chunk_index": 5,
+        "total_chunks": 24
       }
     }
   ],
-  "total_retrieved": 1
+  "total_retrieved": 3
 }
+```
+
+### 7. Delete a Document
+Remove metadata from PostgreSQL and all vector chunks from Qdrant:
+
+```bash
+curl -X DELETE "http://localhost:8000/api/documents/0074b64e-0f31-41f1-9418-5ca223fd6d55"
+```
+
+### 8. View Logs & Container Status
+Check container health and logs:
+
+```bash
+# Check running containers
+docker compose ps
+
+# View API logs
+docker compose logs -f api
+
+# View database logs
+docker compose logs -f db
+
+# View vector database logs
+docker compose logs -f vector_db
+```
+
+### 9. Stop Containers
+```bash
+docker compose down
+```
+
+To stop and wipe database volumes:
+```bash
+docker compose down -v
 ```
 
 ---
 
-## 🧪 Running Automated Tests
+## User Interfaces
 
-To run the automated test suite locally:
+- **Web Dashboard**: Open `http://localhost:8000/` in any browser to upload files and ask questions visually.
+- **Swagger Documentation**: Open `http://localhost:8000/docs` for interactive API documentation and manual endpoint testing.
+- **ReDoc**: Open `http://localhost:8000/redoc` for complete schema reference.
+
+---
+
+## Running Automated Tests
+
+A comprehensive test suite is included in `tests/` covering document parsing, chunking boundaries, BM25 tokenization, source attribution formatting, and all FastAPI endpoints:
+
 ```bash
-pytest -v tests/
+# Run all tests
+python -m pytest tests/ -v
 ```
+
+Expected test result:
+```text
+collected 11 items
+
+tests/test_api_endpoints.py .....                                        [ 45%]
+tests/test_parser.py ...                                                 [ 72%]
+tests/test_search_and_llm.py ...                                         [100%]
+
+======================= 11 passed in 16.44s =======================
+```
+
+---
+
+## Configuration Reference (`.env`)
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `DB_USER` | `rag_user` | PostgreSQL username |
+| `DB_PASSWORD` | `rag_password` | PostgreSQL password |
+| `DB_NAME` | `rag_metadata_db` | PostgreSQL database name |
+| `DB_HOST` | `db` | Database service host |
+| `DB_PORT` | `5432` | Database service port |
+| `VECTOR_DB_HOST` | `vector_db` | Qdrant host |
+| `VECTOR_DB_PORT` | `6333` | Qdrant HTTP port |
+| `QDRANT_COLLECTION_NAME` | `document_chunks` | Name of vector collection |
+| `EMBEDDING_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model on HuggingFace |
+| `EMBEDDING_DIM` | `384` | Embedding vector dimensions |
+| `RERANKER_MODEL_NAME` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model name |
+| `COHERE_API_KEY` | *(empty)* | Optional Cohere API key for cloud reranker |
+| `LLM_PROVIDER` | `openai` | LLM engine (`openai` or `mock`) |
+| `OPENAI_API_KEY` | *(your key)* | OpenAI API key (falls back cleanly if empty) |
+| `OPENAI_MODEL_NAME` | `gpt-4o-mini` | Target OpenAI model |
